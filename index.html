@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Metaverse GPS Tracker (Multi-User)</title>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; background-color: #f0f2f5; padding: 20px; color: #333; }
+        .card { background: white; max-width: 450px; margin: 30px auto; padding: 30px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        h2 { color: #1a73e8; margin-bottom: 20px; }
+        .status-box { padding: 12px; border-radius: 8px; font-weight: bold; margin-bottom: 20px; background-color: #ffeeba; color: #856404; }
+        .success { background-color: #d4edda; color: #155724; }
+        .error { background-color: #f8d7da; color: #721c24; }
+        .data-label { font-size: 0.9rem; color: #666; margin-top: 15px; text-align: left; font-weight: bold; }
+        
+        /* สไตล์สำหรับช่องกรอก User ID */
+        input[type="text"] { width: 100%; padding: 12px; font-size: 1.1rem; border: 2px solid #ddd; border-radius: 8px; box-sizing: border-box; margin-top: 5px; font-weight: bold; text-align: center; }
+        input[type="text"]:focus { border-color: #1a73e8; outline: none; }
+        input[type="text"]:disabled { background-color: #e9ecef; color: #6c757d; border-color: #ccc; cursor: not-allowed; }
+
+        .data-value { font-size: 1.2rem; font-weight: bold; background: #e9ecef; padding: 10px; border-radius: 5px; margin-top: 5px; font-family: monospace; }
+        button { background-color: #1a73e8; color: white; border: none; padding: 15px 25px; font-size: 1.1rem; border-radius: 25px; cursor: pointer; transition: 0.3s; width: 100%; margin-top: 25px; font-weight: bold; }
+        button:hover { background-color: #1557b0; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; box-shadow: none; }
+    </style>
+</head>
+<body>
+
+    <div class="card">
+        <h2>🌐 Metaverse GPS Tracker</h2>
+        
+        <div id="status" class="status-box">กำลังเชื่อมต่อกับ HiveMQ Cloud...</div>
+        
+        <div class="data-label">รหัสผู้ใช้งาน (User ID):</div>
+        <input type="text" id="userIdInput" value="user_01" placeholder="เช่น user_01, player_2">
+
+        <div class="data-label">พิกัดล่าสุดจาก GPS:</div>
+        <div id="coords" class="data-value">รอรับสัญญาณ GPS...</div>
+        
+        <div class="data-label">จำนวนแพ็กเกจที่ส่งไปแล้ว (ทุกๆ 1 วินาที):</div>
+        <div id="counter" class="data-value">0 ครั้ง</div>
+
+        <button id="gpsBtn" onclick="toggleTracking()" disabled>เริ่มต้นส่งพิกัดอัตโนมัติ</button>
+    </div>
+
+    <script>
+        // 🛠️ คอนฟิกเชื่อมต่อ HiveMQ
+        const HOST = 'wss://2b9a07d0bbaa40039f9b057eac843069.s1.eu.hivemq.cloud:8884/mqtt';
+        
+        // ⚠️ อย่าลืมใส่ Username/Password ของคุณ
+        const USERNAME = 'Chula'; 
+        const PASSWORD = 'Chula123';
+
+        let client;
+        let watchId = null;        
+        let sendIntervalId = null; 
+        let currentPosition = null;
+        let sendCount = 0;
+
+        // เชื่อมต่อไปยัง HiveMQ Cloud
+        try {
+            client = mqtt.connect(HOST, {
+                username: USERNAME,
+                password: PASSWORD,
+                clean: true,
+                connectTimeout: 4000
+            });
+
+            client.on('connect', () => {
+                const statusDiv = document.getElementById('status');
+                statusDiv.innerText = 'เชื่อมต่อ HiveMQ สำเร็จ!';
+                statusDiv.className = 'status-box success';
+                document.getElementById('gpsBtn').disabled = false;
+            });
+
+            client.on('error', (err) => {
+                showError('เชื่อมต่อล้มเหลว: ตรวจสอบ Username/Password');
+                console.error(err);
+            });
+        } catch (e) {
+            showError('เกิดข้อผิดพลาดในการตั้งค่าระบบ');
+        }
+
+        // ฟังก์ชัน เปิด/ปิด การทำงานระบบส่งพิกัด
+        function toggleTracking() {
+            const btn = document.getElementById('gpsBtn');
+            const userIdInput = document.getElementById('userIdInput');
+            
+            // เช็กว่ากรอก User ID หรือยัง
+            if (userIdInput.value.trim() === "") {
+                alert("กรุณากรอก รหัสผู้ใช้งาน (User ID) ก่อนเริ่มต้นครับ");
+                userIdInput.focus();
+                return;
+            }
+
+            if (sendIntervalId === null) {
+                if (navigator.geolocation) {
+                    // เปลี่ยนปุ่มและล็อกช่องกรอก User ID เพื่อไม่ให้เปลี่ยนกะทันหันตอนกำลังส่งข้อมูล
+                    btn.innerText = '⏸️ หยุดส่งพิกัด';
+                    btn.style.backgroundColor = '#dc3545';
+                    userIdInput.disabled = true; 
+                    
+                    watchId = navigator.geolocation.watchPosition((position) => {
+                        currentPosition = position; 
+                        
+                        const lat = position.coords.latitude;
+                        const lng = position.coords.longitude;
+                        document.getElementById('coords').innerText = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+
+                        // 💡 ทันทีที่ได้พิกัดใหม่อย่างถูกต้อง ให้อัปเดตสถานะเป็นสีเขียว
+                        const statusDiv = document.getElementById('status');
+                        statusDiv.innerText = 'เชื่อมต่อ HiveMQ สำเร็จ! (กำลังส่งพิกัดปกติ)';
+                        statusDiv.className = 'status-box success';
+                    }, handleGPSError, {
+                        enableHighAccuracy: true,
+                        maximumAge: 0,
+                        timeout: 5000
+                    });
+
+                    sendIntervalId = setInterval(() => {
+                        if (currentPosition) {
+                            sendLocationToHiveMQ(currentPosition, userIdInput.value.trim());
+                        }
+                    }, 1000); 
+
+                } else {
+                    showError('อุปกรณ์ไม่รองรับ GPS');
+                }
+            } else {
+                // หากกดหยุดการทำงาน ปลดล็อกช่องกรอก User ID
+                navigator.geolocation.clearWatch(watchId);
+                clearInterval(sendIntervalId);
+                
+                watchId = null;
+                sendIntervalId = null;
+                currentPosition = null;
+                
+                btn.innerText = 'เริ่มต้นส่งพิกัดอัตโนมัติ';
+                btn.style.backgroundColor = '#1a73e8';
+                userIdInput.disabled = false;
+            }
+        }
+
+        // ฟังก์ชันส่งขึ้น HiveMQ โดยรับค่า userId มาด้วย
+        function sendLocationToHiveMQ(position, userId) {
+            const lat = position.coords.latitude;
+            const lng = position.coords.longitude;
+            
+            // 1. ใส่ userId ลงไปใน Payload
+            const payload = {
+                user_id: userId,
+                lat: lat,
+                lng: lng,
+                timestamp: Date.now()
+            };
+            
+            // 2. ปรับ Topic ให้เปลี่ยนตามชื่อ User ID อัตโนมัติ (เช่น metaverse/player_1/position)
+            const topic = `metaverse/${userId}/position`;
+            
+            client.publish(topic, JSON.stringify(payload), { qos: 0 }, (err) => {
+                if (!err) {
+                    sendCount++;
+                    document.getElementById('counter').innerText = `${sendCount} ครั้ง`;
+                }
+            });
+        }
+
+        function handleGPSError(error) {
+            if (error.code === error.PERMISSION_DENIED) {
+                showError('โปรดอนุญาตให้สิทธิ์เข้าถึง GPS แก่หน้าเว็บนี้');
+            } else {
+                showError('ไม่สามารถจับสัญญาณ GPS ได้: ' + error.message);
+            }
+        }
+
+        function showError(msg) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.innerText = msg;
+            statusDiv.className = 'status-box error';
+        }
+    </script>
+</body>
+</html>
